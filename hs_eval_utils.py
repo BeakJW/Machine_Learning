@@ -1,4 +1,4 @@
-from pandas import DataFrame, merge
+from pandas import DataFrame, merge, concat
 from matplotlib import pyplot as plt
 import seaborn as sb
 import numpy as np
@@ -441,3 +441,140 @@ def hs_feature_importance(model, x_train, y_train):
     plt.close()
 
     return imp_df
+
+
+def hs_describe(data, columns=None):
+    num_columns = list(data.select_dtypes(include=np.number).columns)
+
+    if not columns:
+        columns = num_columns
+
+    # 기술통계량 구하기
+    desc = data[columns].describe().T
+
+    # 각 컬럼별 결측치 수(na_count) 추가
+    na_counts = data[columns].isnull().sum()
+    desc.insert(1, "na_count", na_counts)
+
+    # 결측치 비율(na_rate) 추가
+    desc.insert(2, "na_rate", (na_counts / len(data)) * 100)
+
+    # 추가 통계량 계산
+    additional_stats = []
+    for f in columns:
+        # 숫자 타입이 아니면 건너뜀
+        if f not in num_columns:
+            continue
+
+        # 사분위수
+        q1 = data[f].quantile(q=0.25)
+        q3 = data[f].quantile(q=0.75)
+
+        # 이상치 경계 (Tukey's fences)
+        iqr = q3 - q1
+
+        down = q1 - 1.5 * iqr
+        up = q3 + 1.5 * iqr
+
+        # 왜도
+        skew = data[f].skew()
+
+        # 이상치 개수 및 비율
+        outlier_count = ((data[f] < down) | (data[f] > up)).sum()
+        outlier_rate = (outlier_count / len(data)) * 100
+
+        # 분포 특성 판정 (왜도 기준)
+        abs_skew = abs(skew)
+        if abs_skew < 0.5:
+            dist = "거의 대칭"
+        elif abs_skew < 1.0:
+            if skew > 0:
+                dist = "약간 우측 꼬리"
+            else:
+                dist = "약간 좌측 꼬리"
+        elif abs_skew < 2.0:
+            if skew > 0:
+                dist = "중간 우측 꼬리"
+            else:
+                dist = "중간 좌측 꼬리"
+        else:
+            if skew > 0:
+                dist = "극단 우측 꼬리"
+            else:
+                dist = "극단 좌측 꼬리"
+
+        # 로그변환 필요성 판정
+        if abs_skew < 0.5:
+            log_need = "낮음"
+        elif abs_skew < 1.0:
+            log_need = "중간"
+        else:
+            log_need = "높음"
+
+        additional_stats.append(
+            {
+                "field": f,
+                "iqr": iqr,
+                "up": up,
+                "down": down,
+                "outlier_count": outlier_count,
+                "outlier_rate": outlier_rate,
+                "skew": skew,
+                "dist": dist,
+                "log_need": log_need,
+            }
+        )
+
+    additional_df = DataFrame(additional_stats).set_index("field")
+
+    # 결과 병합
+    result = concat([desc, additional_df], axis=1)
+
+    return result
+
+
+def category_describe(data, columns=None):
+    num_columns = data.select_dtypes(include=np.number).columns
+
+    if not columns:
+        # 명목형(범주형) 컬럼 선택: object, category, bool 타입
+        columns = data.select_dtypes(include=["object", "category", "bool"]).columns  # type: ignore
+
+    result = []
+    summary = []
+    for f in columns:
+        # 숫자형 컬럼은 건너뜀
+        if f in num_columns:
+            continue
+
+        # 각 범주의 빈도수 계산 (NaN 포함)
+        value_counts = data[f].value_counts(dropna=False)
+
+        # 범주별 빈도/비율 정보 추가 (category_table 기능)
+        for category, count in value_counts.items():
+            rate = (count / len(data)) * 100
+            result.append(
+                {"변수": f, "범주": category, "빈도": count, "비율(%)": round(rate, 2)}
+            )
+
+        if len(value_counts) == 0:
+            continue
+
+        # 최다/최소 범주 정보 추가 (category_describe 기능)
+        max_category = value_counts.index[0]
+        max_count = value_counts.iloc[0]
+        max_rate = (max_count / len(data)) * 100
+        min_category = value_counts.index[-1]
+        min_count = value_counts.iloc[-1]
+        min_rate = (min_count / len(data)) * 100
+        summary.append(
+            {
+                "변수": f,
+                "최다_범주": max_category,
+                "최다_비율(%)": round(max_rate, 2),
+                "최소_범주": min_category,
+                "최소_비율(%)": round(min_rate, 2),
+            }
+        )
+
+    return DataFrame(result), DataFrame(summary).set_index("변수")
