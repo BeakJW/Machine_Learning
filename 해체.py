@@ -19,11 +19,11 @@ BASE_DIR = Path("/Users/jinwoo/Machine_Learning")
 
 # 방식 A) 파일명 리스트만 바꾸기 (가장 단순)
 PDF_NAMES: List[str] = [
-    "03-BaggingㅣRandomForest.pdf",
+    "05-비선형 분류.pdf",
 ]
 
 # 방식 B) 패턴으로 자동 선택 (PDF_NAMES가 비어있으면 이걸 사용)
-PATTERN = "03-BaggingㅣRandomForest.pdf"  # 예: "*풀이*.pdf"
+PATTERN = "03-로지스틱ㅣ성능평가함수 개선.pdf"  # 예: "*풀이*.pdf"
 
 PASSWORD = "it123!@#"
 

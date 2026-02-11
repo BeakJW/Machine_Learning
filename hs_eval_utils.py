@@ -1,4 +1,4 @@
-from pandas import DataFrame, merge, concat
+from pandas import DataFrame, merge, concat, Series
 from matplotlib import pyplot as plt
 import seaborn as sb
 import numpy as np
@@ -10,6 +10,14 @@ from sklearn.metrics import (
     mean_absolute_error,
     mean_squared_error,
     mean_absolute_percentage_error,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    roc_curve,
+    confusion_matrix,
+    log_loss,
 )
 
 import shap
@@ -45,12 +53,24 @@ def hs_learning_cv(
     estimator,
     x,
     y,
-    scoring="neg_root_mean_squared_error",
+    scoring=None,
     cv=5,
     train_sizes=np.linspace(0.1, 1.0, 10),
     n_jobs=-1,
 ):
-    """학습 곡선 분석 및 과적합 판정 함수"""
+    """학습 곡선 분석 및 과적합 판정 함수 (회귀/분류 자동 판별)"""
+
+    # 문제 유형 자동 판별
+    is_classification = (
+        hasattr(estimator, "_estimator_type")
+        and estimator._estimator_type == "classifier"
+    )
+
+    # scoring 자동 설정
+    if scoring is None:
+        scoring = "roc_auc" if is_classification else "neg_root_mean_squared_error"
+
+    # learning curve 계산
     train_sizes, train_scores, cv_scores = learning_curve(
         estimator=estimator,
         X=x,
@@ -59,59 +79,102 @@ def hs_learning_cv(
         cv=cv,
         scoring=scoring,
         n_jobs=n_jobs,
-        shuffle=True,
+        shuffle=False,
         random_state=52,
     )
 
+    # 모델명 추출
     if hasattr(estimator, "named_steps"):
         classname = estimator.named_steps["model"].__class__.__name__
     else:
         classname = estimator.__class__.__name__
 
-    # neg RMSE -> RMSE
-    train_rmse = -train_scores
-    cv_rmse = -cv_scores
+    # 회귀 전용 처리
+    if not is_classification:
+        # neg RMSE → RMSE
+        train_rmse = -train_scores
+        cv_rmse = -cv_scores
 
-    # 평균 / 표준편차
-    train_mean = train_rmse.mean(axis=1)
-    cv_mean = cv_rmse.mean(axis=1)
-    cv_std = cv_rmse.std(axis=1)
+        # 평균 / 표준편차
+        train_mean = train_rmse.mean(axis=1)
+        cv_mean = cv_rmse.mean(axis=1)
+        cv_std = cv_rmse.std(axis=1)
 
-    # 마지막 지점 기준 정량 판정
-    final_train = train_mean[-1]
-    final_cv = cv_mean[-1]
-    final_std = cv_std[-1]
-    gap_ratio = final_train / final_cv
-    var_ratio = final_std / final_cv
+        # 마지막 지점 기준 정량 판정
+        final_train = train_mean[-1]
+        final_cv = cv_mean[-1]
+        final_std = cv_std[-1]
 
-    # 과소적합 기준선
-    y_mean = y.mean()
-    rmse_naive = np.sqrt(np.mean((y - y_mean) ** 2))
-    std_y = y.std()
-    min_r2 = 0.10
-    rmse_r2 = np.sqrt((1 - min_r2) * np.var(y))
-    some_threshold = min(rmse_naive, std_y, rmse_r2)
+        gap_ratio = final_train / final_cv
+        var_ratio = final_std / final_cv
 
-    # 판정 로직
-    if gap_ratio >= 0.95 and final_cv > some_threshold:
-        status = "⚠️ 과소적합 (bias 큼)"
-    elif gap_ratio <= 0.8:
-        status = "⚠️ 과대적합 (variance 큼)"
-    elif gap_ratio <= 0.95 and var_ratio <= 0.10:
-        status = "✅ 일반화 양호"
-    elif var_ratio > 0.15:
-        status = "⚠️ 데이터 부족 / 분산 큼"
+        # 과소적합 기준선
+        y_mean = y.mean()
+        rmse_naive = np.sqrt(np.mean((y - y_mean) ** 2))
+        std_y = y.std()
+        min_r2 = 0.10
+        rmse_r2 = np.sqrt((1 - min_r2) * np.var(y))
+        some_threshold = min(rmse_naive, std_y, rmse_r2)
+
+        # 마지막 두 지점 기울기
+        train_slope = train_mean[-1] - train_mean[-2]
+        cv_slope = cv_mean[-1] - cv_mean[-2]
+
+        # 판정 로직
+        if gap_ratio >= 0.95 and final_cv > some_threshold:
+            status = "⚠️ 과소적합"
+        elif gap_ratio <= 0.8 and train_slope > 0 and cv_slope < 0:
+            status = "⚠️ 데이터 추가시 일반화 기대"
+        elif gap_ratio <= 0.8:
+            status = "⚠️ 과대적합"
+        elif gap_ratio <= 0.95 and var_ratio <= 0.10:
+            status = "✅ 일반화 양호"
+        elif var_ratio > 0.15:
+            status = "⚠️ 데이터 부족"
+        else:
+            status = "⚠️ 판단유보"
+
+        metric_name = "RMSE"
+
+    # 분류 전용 처리
     else:
-        status = "⚠️ 판단 유보"
+        train_metric = train_scores
+        cv_metric = cv_scores
+
+        train_mean = train_metric.mean(axis=1)
+        cv_mean = cv_metric.mean(axis=1)
+        cv_std = cv_metric.std(axis=1)
+
+        final_train = train_mean[-1]
+        final_cv = cv_mean[-1]
+        final_std = cv_std[-1]
+
+        # 분류용 비율 정의 (차이 기반)
+        gap_ratio = final_train - final_cv
+        var_ratio = final_std
+
+        # 분류 판정 로직
+        if final_train < 0.6 and final_cv < 0.6:
+            status = "⚠️ 과소적합"
+        elif gap_ratio > 0.1:
+            status = "⚠️ 과대적합"
+        elif gap_ratio <= 0.05 and var_ratio <= 0.05:
+            status = "✅ 일반화 양호"
+        elif var_ratio > 0.1:
+            status = "⚠️ 데이터 부족"
+        else:
+            status = "⚠️ 판단유보"
+
+        metric_name = scoring.upper()
 
     # 정량 결과 표
     result_df = DataFrame(
         {
-            "Train RMSE": [final_train],
-            "CV RMSE 평균": [final_cv],
-            "CV RMSE 표준편차": [final_std],
-            "Train/CV 비율": [gap_ratio],
-            "CV 변동성 비율": [var_ratio],
+            f"Train {metric_name}": [final_train],
+            f"CV {metric_name} 평균": [final_cv],
+            f"CV {metric_name} 표준편차": [final_std],
+            f"Train/CV 비율": [gap_ratio],
+            f"CV 변동성 비율": [var_ratio],
             "판정 결과": [status],
         },
         index=[classname],
@@ -126,7 +189,7 @@ def hs_learning_cv(
         y=train_mean,
         marker="o",
         markeredgecolor="#ffffff",
-        label="Train RMSE",
+        label=f"Train {metric_name}",
         ax=ax,
     )
 
@@ -135,13 +198,12 @@ def hs_learning_cv(
         y=cv_mean,
         marker="o",
         markeredgecolor="#ffffff",
-        label="CV RMSE",  # 원본에서 "Train RMSE"로 되어 있던 버그 수정
+        label=f"CV {metric_name}",
         ax=ax,
     )
 
-    # x축과 y축이 바뀌어 있던 것 수정
     ax.set_xlabel("훈련 데이터 수", fontsize=8, labelpad=5)
-    ax.set_ylabel("RMSE", fontsize=8, labelpad=5)
+    ax.set_ylabel(metric_name, fontsize=8, labelpad=5)
     ax.set_title("학습곡선 (Learning Curve)", fontsize=12, pad=8)
     ax.grid(True, alpha=0.3)
     ax.legend()
@@ -209,9 +271,7 @@ def feature_importance(model, x_train, y_train):
     sb.barplot(data=df, x="importance_mean", y=df.index, ax=ax)
 
     ax.set_title("Permutation Importance", fontsize=12)
-    ax.set_xlabel(
-        "Permutation Importance (mean)", fontsize=10
-    )  # 오타 수정: ermutation -> Permutation
+    ax.set_xlabel("Permutation Importance (mean)", fontsize=10)
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -260,8 +320,8 @@ def hs_shap_analysis(
 
     summary_df["variability"] = np.where(
         summary_df["cv"] < 1,
-        "stable",  # 변동성 낮음
-        "variable",  # 변동성 큼
+        "stable",
+        "variable",
     )
 
     # 7. 중요도 기준 정렬
@@ -371,14 +431,20 @@ def hs_shap_dependence_analysis(
 
 
 def hs_feature_importance(model, x_train, y_train):
-    if isinstance(model, XGBRegressor):
-        booster = model.get_booster()
-        imp = booster.get_score(importance_type="gain")
-        imp_sr = Series(imp)
-        imp_df = DataFrame(imp_sr, columns=["importance"])
-    else:
-        imp_df = permutation_importance(
-            estimator=best_model,
+    """변수 중요도 계산 및 시각화 (XGBoost/일반 모델 자동 판별)"""
+    try:
+        from xgboost import XGBRegressor
+
+        if isinstance(model, XGBRegressor):
+            booster = model.get_booster()
+            imp = booster.get_score(importance_type="gain")
+            imp_sr = Series(imp)
+            imp_df = DataFrame(imp_sr, columns=["importance"])
+        else:
+            raise ImportError  # 일반 모델 처리로 이동
+    except (ImportError, AttributeError):
+        perm = permutation_importance(
+            estimator=model,
             X=x_train,
             y=y_train,
             scoring="r2",
@@ -387,10 +453,7 @@ def hs_feature_importance(model, x_train, y_train):
             n_jobs=-1,
         )
 
-        # 결과 정리
-        imp_df = DataFrame(
-            {"importance": imp_df.importances_mean}, index=x_train.columns
-        )
+        imp_df = DataFrame({"importance": perm.importances_mean}, index=x_train.columns)
 
     # 중요도 비율 + 누적 중요도 계산
     imp_df["ratio"] = imp_df["importance"] / imp_df["importance"].sum()
@@ -405,14 +468,14 @@ def hs_feature_importance(model, x_train, y_train):
     figsize = (1280 / 100, height / 100)
     fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=my_dpi)
 
-    sb.barplot(data=df, x="importance", y=df.index)
+    sb.barplot(data=df, x="importance", y=df.index, ax=ax)
 
     # 값 라벨 추가
     for i, v in enumerate(imp_df["importance"]):
         ax.text(
-            v + 0.005,  # 막대 끝에서 약간 오른쪽
-            i,  # y 위치
-            f"{v:.1f} ({imp_df.iloc[i]['cumsum']*100:.1f}%)",  # 표시 형식
+            v + 0.005,
+            i,
+            f"{v:.1f} ({imp_df.iloc[i]['cumsum']*100:.1f}%)",
             va="center",
         )
 
@@ -422,13 +485,11 @@ def hs_feature_importance(model, x_train, y_train):
     ax.grid(True, alpha=0.3)
     ax.set_xlim(0, imp_df["importance"].max() * 1.2)
 
-    # 90% 처음 도달하는 인덱스 (0-based)
+    # 90% 처음 도달하는 인덱스
     cut_idx = np.argmax(imp_df["cumsum"].values >= threshold)
-
-    # 주황색 rank 기준으로 +1
     cut_rank = (int(cut_idx) + 1) - 0.5
 
-    # 90% 도달 지점 수직선 (핵심)
+    # 90% 도달 지점 수직선
     plt.axhline(
         y=cut_rank,
         linestyle="--",
@@ -444,6 +505,7 @@ def hs_feature_importance(model, x_train, y_train):
 
 
 def hs_describe(data, columns=None):
+    """기술통계량 + 이상치 + 분포 분석"""
     num_columns = list(data.select_dtypes(include=np.number).columns)
 
     if not columns:
@@ -472,7 +534,6 @@ def hs_describe(data, columns=None):
 
         # 이상치 경계 (Tukey's fences)
         iqr = q3 - q1
-
         down = q1 - 1.5 * iqr
         up = q3 + 1.5 * iqr
 
@@ -534,11 +595,11 @@ def hs_describe(data, columns=None):
 
 
 def category_describe(data, columns=None):
+    """범주형 변수 분석 (빈도표 + 요약)"""
     num_columns = data.select_dtypes(include=np.number).columns
 
     if not columns:
-        # 명목형(범주형) 컬럼 선택: object, category, bool 타입
-        columns = data.select_dtypes(include=["object", "category", "bool"]).columns  # type: ignore
+        columns = data.select_dtypes(include=["object", "category", "bool"]).columns
 
     result = []
     summary = []
@@ -550,7 +611,7 @@ def category_describe(data, columns=None):
         # 각 범주의 빈도수 계산 (NaN 포함)
         value_counts = data[f].value_counts(dropna=False)
 
-        # 범주별 빈도/비율 정보 추가 (category_table 기능)
+        # 범주별 빈도/비율 정보 추가
         for category, count in value_counts.items():
             rate = (count / len(data)) * 100
             result.append(
@@ -560,7 +621,7 @@ def category_describe(data, columns=None):
         if len(value_counts) == 0:
             continue
 
-        # 최다/최소 범주 정보 추가 (category_describe 기능)
+        # 최다/최소 범주 정보 추가
         max_category = value_counts.index[0]
         max_count = value_counts.iloc[0]
         max_rate = (max_count / len(data)) * 100
@@ -578,3 +639,70 @@ def category_describe(data, columns=None):
         )
 
     return DataFrame(result), DataFrame(summary).set_index("변수")
+
+
+def hs_cls_bin_scores(estimator, x_test, y_test):
+    """이진 분류 모델 성능 평가 및 ROC 곡선"""
+    # 예측 확률
+    y_pred_proba = estimator.predict_proba(x_test)
+    y_pred_proba_1 = estimator.predict_proba(x_test)[:, 1]
+
+    # 예측값
+    y_pred = estimator.predict(x_test)
+
+    # 의사결정계수
+    log_loss_test = -log_loss(y_test, y_pred_proba, normalize=False)
+    y_null = np.ones_like(y_test) * y_test.mean()
+    log_loss_null = -log_loss(y_test, y_null, normalize=False)
+    pseudo_r2 = 1 - (log_loss_test / log_loss_null)
+
+    # 혼동행렬
+    cm = confusion_matrix(y_test, y_pred)
+    ((TN, FP), (FN, TP)) = cm
+
+    # 클래스 이름
+    if hasattr(estimator, "named_steps"):
+        classname = estimator.named_steps["model"].__class__.__name__
+    else:
+        classname = estimator.__class__.__name__
+
+    # auc score
+    auc = roc_auc_score(y_test, y_pred_proba_1)
+
+    score_df = DataFrame(
+        {
+            "정확도(Accuracy)": [accuracy_score(y_test, y_pred)],
+            "정밀도(Precision)": [precision_score(y_test, y_pred)],
+            "재현율(Recall,tpr)": [recall_score(y_test, y_pred)],
+            "위양성율(Fallout,fpr)": [FP / (TN + FP)],
+            "특이성(TNR)": [1 - (FP / (TN + FP))],
+            "F1 Score": [f1_score(y_test, y_pred)],
+            "AUC": [auc],
+        },
+        index=[classname],
+    )
+
+    # ROC 곡선 그리기
+    roc_fpr, roc_tpr, thresholds = roc_curve(y_test, y_pred_proba_1)
+
+    width_px = 1000
+    height_px = 900
+    rows = 1
+    cols = 1
+    figsize = (width_px / my_dpi, height_px / my_dpi)
+    fig, ax = plt.subplots(rows, cols, figsize=figsize, dpi=my_dpi)
+
+    sb.lineplot(x=roc_fpr, y=roc_tpr, ax=ax)
+    sb.lineplot(x=[0, 1], y=[0, 1], color="red", linestyle=":", alpha=0.5, ax=ax)
+    plt.fill_between(x=roc_fpr, y1=roc_tpr, alpha=0.1)
+
+    ax.grid(True, alpha=0.3)
+    ax.set_title(f"AUC={auc:.4f}", fontsize=10, pad=4)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+    plt.tight_layout()
+    plt.show()
+    plt.close()
+
+    return score_df
