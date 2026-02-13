@@ -594,7 +594,7 @@ def hs_describe(data, columns=None):
     return result
 
 
-def category_describe(data, columns=None):
+def hs_category_describe(data, columns=None):
     """범주형 변수 분석 (빈도표 + 요약)"""
     num_columns = data.select_dtypes(include=np.number).columns
 
