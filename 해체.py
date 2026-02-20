@@ -19,7 +19,7 @@ BASE_DIR = Path("/Users/jinwoo/Machine_Learning")
 
 # 방식 A) 파일명 리스트만 바꾸기 (가장 단순)
 PDF_NAMES: List[str] = [
-    "01-추천시스템ㅣBaselineOnly.pdf"
+    "02-추천시스템ㅣKNNBasic.pdf"
 ]
 
 # 방식 B) 패턴으로 자동 선택 (PDF_NAMES가 비어있으면 이걸 사용)
